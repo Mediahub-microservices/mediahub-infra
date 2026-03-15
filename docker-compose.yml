@@ -1,101 +1,161 @@
 services:
-  user_db:
-    image: postgres:15-alpine
-    container_name: user_db
-    environment:
-      POSTGRES_DB: mediahub_user
-      POSTGRES_USER: ${DB_USER:-postgres}
-      POSTGRES_PASSWORD: ${DB_PASS:-password}
+  discovery-server:
+    build: ./discovery-server
+    container_name: discovery-server
     ports:
-      - "${USER_DB_PORT:-5433}:5432"
-    volumes:
-      - user_db_data:/var/lib/postgresql/data
+      - "8761:8761"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8761"]
       interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - mediahub-network
+
+  config-server:
+    build: ./mediahub-config-server
+    container_name: config-server
+    ports:
+      - "8888:8888"
+    environment:
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://discovery-server:8761/eureka/
+      - SPRING_PROFILES_ACTIVE=native
+    volumes:
+      - ./mediahub-config-repo:/config
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8888/api-gateway/default"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      - discovery-server
+    networks:
+      - mediahub-network
+
+  api-gateway:
+    build: ./api-gateway
+    container_name: api-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://discovery-server:8761/eureka/
+      - SPRING_CLOUD_CONFIG_URI=http://config-server:8888
+    restart: on-failure
+    depends_on:
+      discovery-server:
+        condition: service_healthy
+      config-server:
+        condition: service_healthy
+    networks:
+      - mediahub-network
+
+  user-db:
+    image: postgres:15-alpine
+    container_name: user-db
+    environment:
+      - POSTGRES_DB=mediahub_user
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+    ports:
+      - "54331:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d mediahub_user"]
+      interval: 5s
       timeout: 5s
       retries: 5
     networks:
       - mediahub-network
 
-  media_db:
+  media-db:
     image: postgres:15-alpine
-    container_name: media_db
+    container_name: media-db
     environment:
-      POSTGRES_DB: mediahub_media
-      POSTGRES_USER: ${DB_USER:-postgres}
-      POSTGRES_PASSWORD: ${DB_PASS:-password}
+      - POSTGRES_DB=mediahub_media
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
     ports:
-      - "${MEDIA_DB_PORT:-5434}:5432"
-    volumes:
-      - media_db_data:/var/lib/postgresql/data
+      - "54341:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
-      interval: 10s
+      test: ["CMD-SHELL", "pg_isready -U postgres -d mediahub_media"]
+      interval: 5s
       timeout: 5s
       retries: 5
     networks:
       - mediahub-network
 
-  subscription_db:
+  subscription-db:
     image: postgres:15-alpine
-    container_name: subscription_db
+    container_name: subscription-db
     environment:
-      POSTGRES_DB: mediahub_subscription
-      POSTGRES_USER: ${DB_USER:-postgres}
-      POSTGRES_PASSWORD: ${DB_PASS:-password}
+      - POSTGRES_DB=mediahub_subscription
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
     ports:
-      - "${SUB_DB_PORT:-5435}:5432"
-    volumes:
-      - subscription_db_data:/var/lib/postgresql/data
+      - "54351:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
-      interval: 10s
+      test: ["CMD-SHELL", "pg_isready -U postgres -d mediahub_subscription"]
+      interval: 5s
       timeout: 5s
       retries: 5
     networks:
       - mediahub-network
 
-  pgadmin:
-    image: dpage/pgadmin4
-    container_name: pgadmin_container
+  user-service:
+    build: ./user-service
+    container_name: user-service
     environment:
-      PGADMIN_DEFAULT_EMAIL: email@mediahub.com
-      PGADMIN_DEFAULT_PASSWORD: admin
-    ports:
-      - "5050:80"
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://discovery-server:8761/eureka/
+      - SPRING_CLOUD_CONFIG_URI=http://config-server:8888
+      - DB_HOST=user-db
+      - USER_DB_PORT=5432
+    restart: on-failure
+    depends_on:
+      user-db:
+        condition: service_healthy
+      discovery-server:
+        condition: service_healthy
+      config-server:
+        condition: service_healthy
     networks:
       - mediahub-network
 
-  prometheus:
-    image: prom/prometheus:v2.45.0
-    container_name: prometheus
-    ports:
-      - "9091:9090"
-    volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    networks:
-      - mediahub-network
-
-  grafana:
-    image: grafana/grafana:10.0.3
-    container_name: grafana
-    ports:
-      - "3001:3000"
+  media-service:
+    build: ./media-service
+    container_name: media-service
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-    volumes:
-      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
-      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://discovery-server:8761/eureka/
+      - SPRING_CLOUD_CONFIG_URI=http://config-server:8888
+      - DB_HOST=media-db
+      - MEDIA_DB_PORT=5432
+    restart: on-failure
+    depends_on:
+      media-db:
+        condition: service_healthy
+      discovery-server:
+        condition: service_healthy
+      config-server:
+        condition: service_healthy
     networks:
       - mediahub-network
 
-volumes:
-  user_db_data:
-  media_db_data:
-  subscription_db_data:
+  subscription-service:
+    build: ./subscription-service
+    container_name: subscription-service
+    environment:
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://discovery-server:8761/eureka/
+      - SPRING_CLOUD_CONFIG_URI=http://config-server:8888
+      - DB_HOST=subscription-db
+      - SUB_DB_PORT=5432
+    restart: on-failure
+    depends_on:
+      subscription-db:
+        condition: service_healthy
+      discovery-server:
+        condition: service_healthy
+      config-server:
+        condition: service_healthy
+    networks:
+      - mediahub-network
 
 networks:
   mediahub-network:
